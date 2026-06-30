@@ -1,0 +1,116 @@
+name: Mod Release Builder
+description: Build a distributable mod archive and publish a GitHub Release from an annotated Git tag.
+
+inputs:
+  mod_name:
+    required: true
+
+  mod_folder:
+    required: true
+
+  source_dir:
+    required: false
+    default: mod
+
+  tag_name:
+    required: true
+
+outputs:
+  version:
+    value: ${{ steps.metadata.outputs.version }}
+  body:
+    value: ${{ steps.metadata.outputs.body }}
+
+runs:
+  using: composite
+
+  steps:
+    - name: Install XML tools
+      shell: bash
+      run: |
+        set -euo pipefail
+        sudo apt-get update
+        sudo apt-get install -y libxml2-utils
+
+    - name: Prepare metadata
+      id: metadata
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        TAG="${{ inputs.tag_name }}"
+        VERSION="${TAG#v}"
+        MODINFO="${{ inputs.source_dir }}/${{ inputs.mod_folder }}/ModInfo.xml"
+        ARCHIVE="${{ inputs.mod_name }}-${TAG}.zip"
+
+        git tag --list "$TAG" --format='%(contents)' | awk '
+          BEGIN { skip=0 }
+          /-----BEGIN PGP SIGNATURE-----/ { skip=1 }
+          skip == 0 { print }
+        ' > release-body.md
+
+        test -s release-body.md || {
+          echo "::error::Tag '$TAG' must be annotated and contain release notes."
+          exit 1
+        }
+
+        test -f "$MODINFO" || {
+          echo "::error::Missing ModInfo.xml in primary folder '${{ inputs.mod_folder }}'."
+          exit 1
+        }
+
+        XML_VERSION="$(
+          xmllint --xpath 'string(/xml/Version/@value)' "$MODINFO"
+        )"
+
+        test -n "$XML_VERSION" || {
+          echo "::error::Unable to read Version/@value from ModInfo.xml."
+          exit 1
+        }
+
+        if [[ "$XML_VERSION" != "$VERSION" ]]; then
+          echo "::error::Version mismatch."
+          echo "Tag:         $VERSION"
+          echo "ModInfo.xml: $XML_VERSION"
+          exit 1
+        fi
+
+        {
+          echo "tag=$TAG"
+          echo "version=$VERSION"
+          echo "archive=$ARCHIVE"
+          echo "body<<EOF"
+          cat release-body.md
+          echo "EOF"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Build archive
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        (
+          cd "${{ inputs.source_dir }}"
+          # Archive ALL contents (all subfolders and any files at the root)
+          zip -rq "../${{ steps.metadata.outputs.archive }}" .
+        )
+
+    - name: Validate archive
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        # Ensure the primary mod folder and its ModInfo.xml are present in the archive
+        unzip -Z1 "${{ steps.metadata.outputs.archive }}" |
+          grep -Fx "${{ inputs.mod_folder }}/ModInfo.xml" >/dev/null || {
+            echo "::error::Archive does not contain '${{ inputs.mod_folder }}/ModInfo.xml'."
+            exit 1
+          }
+
+    - name: Publish GitHub Release
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: ${{ steps.metadata.outputs.tag }}
+        name: "${{ inputs.mod_name }} ${{ steps.metadata.outputs.tag }}"
+        body_path: release-body.md
+        files: ${{ steps.metadata.outputs.archive }}

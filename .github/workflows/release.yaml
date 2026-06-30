@@ -1,0 +1,23 @@
+# .github/workflows/release.yaml
+# Located in the mod repository (e.g., 7BytesToDie/MyMod)
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write   # required for the reusable workflow to create the release
+
+jobs:
+  call-release:
+    uses: 7BytesToDie/7DTD-mod-release-action/.github/workflows/release-orchestrator.yml@v1
+    with:
+      source_dir: mod   # optional; defaults to "mod"
+    secrets:
+      RELEASE_NOTES_TOKEN: ${{ secrets.RELEASE_NOTES_TOKEN }}
+      NEXUSMODS_API_KEY: ${{ secrets.NEXUSMODS_API_KEY }}
+      NEXUSMODS_FILE_GROUP_ID: ${{ secrets.NEXUSMODS_FILE_GROUP_ID }}

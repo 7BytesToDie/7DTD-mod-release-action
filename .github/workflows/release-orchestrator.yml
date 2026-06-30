@@ -1,0 +1,129 @@
+# .github/workflows/release-orchestrator.yml
+# Located in: 7BytesToDie/7DTD-mod-release-action
+
+name: Release Orchestrator
+
+on:
+  workflow_call:
+    inputs:
+      source_dir:
+        required: false
+        type: string
+        default: mod
+    secrets:
+      RELEASE_NOTES_TOKEN:
+        required: true
+      NEXUSMODS_API_KEY:
+        required: true
+      NEXUSMODS_FILE_GROUP_ID:
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    outputs:
+      version:  ${{ steps.mod.outputs.version }}
+      body:     ${{ steps.mod.outputs.body }}
+      mod_name: ${{ steps.vars.outputs.mod_name }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Derive mod_name and mod_folder
+        id: vars
+        run: |
+          repo_name="${GITHUB_REPOSITORY#*/}"
+          echo "mod_name=$repo_name" >> $GITHUB_OUTPUT
+
+          folder=$(ls -d ${{ inputs.source_dir }}/*/ 2>/dev/null | head -n 1 | xargs basename)
+          if [ -z "$folder" ]; then
+            echo "Error: No folder found inside ${{ inputs.source_dir }}/" >&2
+            exit 1
+          fi
+          echo "mod_folder=$folder" >> $GITHUB_OUTPUT
+
+      - name: Run Mod Release Action
+        id: mod
+        uses: 7BytesToDie/7DTD-mod-release-action@v1
+        with:
+          mod_name:   ${{ steps.vars.outputs.mod_name }}
+          mod_folder: ${{ steps.vars.outputs.mod_folder }}
+          source_dir: ${{ inputs.source_dir }}
+          tag_name:   ${{ github.ref_name }}
+
+  post_release:
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout release notes repository
+        uses: actions/checkout@v6
+        with:
+          repository: 7BytesToDie/mods
+          token: ${{ secrets.RELEASE_NOTES_TOKEN }}
+          path: notes
+
+      - name: Update changelog (prepend new version)
+        shell: bash
+        env:
+          MOD_NAME: ${{ needs.release.outputs.mod_name }}
+          VERSION:  ${{ needs.release.outputs.version }}
+          BODY:     ${{ needs.release.outputs.body }}
+        run: |
+          set -euo pipefail
+          MOD_DIR="notes/${MOD_NAME}"
+          CHANGELOG="${MOD_DIR}/changelog.md"
+          mkdir -p "$MOD_DIR"
+
+          NEW_ENTRY_FILE="${CHANGELOG}.new"
+          cat > "$NEW_ENTRY_FILE" <<EOF
+          # ${MOD_NAME} ${VERSION}
+
+          ${BODY}
+
+          EOF
+
+          if [ -f "$CHANGELOG" ]; then
+            cat "$NEW_ENTRY_FILE" "$CHANGELOG" > "${CHANGELOG}.tmp"
+            mv "${CHANGELOG}.tmp" "$CHANGELOG"
+          else
+            mv "$NEW_ENTRY_FILE" "$CHANGELOG"
+          fi
+          rm -f "$NEW_ENTRY_FILE"
+
+      - name: Commit and push changelog
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd notes
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .
+          git diff --cached --quiet && exit 0
+          git commit -m "Add ${{ needs.release.outputs.mod_name }} ${{ needs.release.outputs.version }}"
+          git push
+
+      - name: Download release asset from GitHub
+        shell: bash
+        run: |
+          export GH_TOKEN="${{ github.token }}"
+          gh release download "${{ github.ref_name }}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --pattern "*.zip"
+
+      - name: Find the downloaded zip file
+        id: zip
+        run: echo "zip=$(ls *.zip | head -n 1)" >> "$GITHUB_OUTPUT"
+
+      - name: Upload mod to NexusMods
+        uses: Nexus-Mods/upload-action@main
+        with:
+          api_key: ${{ secrets.NEXUSMODS_API_KEY }}
+          file_id: ${{ secrets.NEXUSMODS_FILE_GROUP_ID }}
+          filename: ${{ steps.zip.outputs.zip }}
+          description: "[url=https://raw.githubusercontent.com/7BytesToDie/mods/main/${{ needs.release.outputs.mod_name }}/changelog.md]Changelog[/url]"
+          version: ${{ needs.release.outputs.version }}
