@@ -14,10 +14,11 @@ permissions:
 
 jobs:
   call-release:
-    uses: 7BytesToDie/7DTD-mod-release-action/.github/workflows/release-orchestrator.yml@v1
+    uses: 7BytesToDie/7DTD-mod-release-action/.github/workflows/release-orchestrator.yml@main
     with:
-      source_dir: mod   # optional; defaults to "mod"
+      source_dir: mod
     secrets:
       RELEASE_NOTES_TOKEN: ${{ secrets.RELEASE_NOTES_TOKEN }}
       NEXUSMODS_API_KEY: ${{ secrets.NEXUSMODS_API_KEY }}
       NEXUSMODS_FILE_GROUP_ID: ${{ secrets.NEXUSMODS_FILE_GROUP_ID }}
+      NEXUSMODS_MOD_URL: ${{ secrets.NEXUSMODS_MOD_URL }}

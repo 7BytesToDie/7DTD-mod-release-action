@@ -17,6 +17,8 @@ on:
         required: true
       NEXUSMODS_FILE_GROUP_ID:
         required: true
+      NEXUSMODS_MOD_URL:                # <-- NEW: full mod page URL (e.g., https://www.nexusmods.com/7daystodie/mods/9902)
+        required: true
 
 permissions:
   contents: write
@@ -60,6 +62,7 @@ jobs:
     needs: release
     runs-on: ubuntu-latest
     steps:
+      # ---------- FALLBACK: update changelog in 7BytesToDie/mods ----------
       - name: Checkout release notes repository
         uses: actions/checkout@v6
         with:
@@ -107,6 +110,7 @@ jobs:
           git commit -m "Add ${{ needs.release.outputs.mod_name }} ${{ needs.release.outputs.version }}"
           git push
 
+      # ---------- DOWNLOAD THE ZIP FROM THE RELEASE ----------
       - name: Download release asset from GitHub
         shell: bash
         run: |
@@ -119,11 +123,48 @@ jobs:
         id: zip
         run: echo "zip=$(ls *.zip | head -n 1)" >> "$GITHUB_OUTPUT"
 
+      # ---------- DYNAMICALLY FETCH THE REAL mod_id FROM NEXUS API ----------
+      - name: Fetch mod_id from Nexus API
+        id: nexus_id
+        shell: bash
+        env:
+          MOD_URL: ${{ secrets.NEXUSMODS_MOD_URL }}
+          API_KEY: ${{ secrets.NEXUSMODS_API_KEY }}
+        run: |
+          set -euo pipefail
+
+          # Extract game_domain and game_scoped_id from the URL
+          # Example: https://www.nexusmods.com/7daystodie/mods/9902
+          if [[ ! "$MOD_URL" =~ https://www\.nexusmods\.com/([^/]+)/mods/([0-9]+) ]]; then
+            echo "::error::Invalid NEXUSMODS_MOD_URL format. Expected: https://www.nexusmods.com/{game}/mods/{id}"
+            exit 1
+          fi
+
+          GAME_DOMAIN="${BASH_REMATCH[1]}"
+          GAME_SCOPED_ID="${BASH_REMATCH[2]}"
+
+          API_URL="https://api.nexusmods.com/v3/games/${GAME_DOMAIN}/mods/${GAME_SCOPED_ID}"
+
+          # Fetch the response and extract .data.id
+          RESPONSE=$(curl -s -H "apikey: $API_KEY" "$API_URL")
+          MOD_ID=$(echo "$RESPONSE" | jq -r '.data.id')
+
+          if [[ -z "$MOD_ID" || "$MOD_ID" == "null" ]]; then
+            echo "::error::Failed to fetch mod_id from Nexus API. Response: $RESPONSE"
+            exit 1
+          fi
+
+          echo "mod_id=$MOD_ID" >> "$GITHUB_OUTPUT"
+          echo "Fetched mod_id: $MOD_ID"
+
+      # ---------- UPLOAD TO NEXUS WITH CHANGELOG ----------
       - name: Upload mod to NexusMods
         uses: Nexus-Mods/upload-action@main
         with:
           api_key: ${{ secrets.NEXUSMODS_API_KEY }}
           file_id: ${{ secrets.NEXUSMODS_FILE_GROUP_ID }}
           filename: ${{ steps.zip.outputs.zip }}
-          description: "[url=https://raw.githubusercontent.com/7BytesToDie/mods/main/${{ needs.release.outputs.mod_name }}/changelog.md]Changelog[/url]"
+          description: "[url=https://raw.githubusercontent.com/7BytesToDie/mods/main/${{ needs.release.outputs.mod_name }}/changelog.md]Full changelog[/url]"
           version: ${{ needs.release.outputs.version }}
+          changelog: ${{ needs.release.outputs.body }}
+          mod_id: ${{ steps.nexus_id.outputs.mod_id }}
