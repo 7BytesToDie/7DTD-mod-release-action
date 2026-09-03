@@ -1,5 +1,5 @@
 # .github/workflows/release-orchestrator.yml
-# Located in: 7BytesToDie/7DTD-mod-release-action
+# Location: 7BytesToDie/7DTD-mod-release-action
 
 name: Release Orchestrator
 
@@ -17,11 +17,15 @@ on:
         required: true
       NEXUSMODS_FILE_GROUP_ID:
         required: true
-      NEXUSMODS_MOD_URL:                # <-- NEW: full mod page URL (e.g., https://www.nexusmods.com/7daystodie/mods/9902)
+      NEXUSMODS_MOD_URL:
         required: true
 
 permissions:
   contents: write
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: true
 
 jobs:
   release:
@@ -35,6 +39,12 @@ jobs:
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
+
+      - name: Cache apt packages
+        uses: awalsh128/cache-apt-pkgs-action@latest
+        with:
+          packages: libxml2-utils
+          version: 1.0
 
       - name: Derive mod_name and mod_folder
         id: vars
@@ -58,11 +68,92 @@ jobs:
           source_dir: ${{ inputs.source_dir }}
           tag_name:   ${{ github.ref_name }}
 
+      - name: Delete tag on validation failure (requires new commit)
+        if: failure() && (steps.vars.outcome == 'failure' || steps.mod.outcome == 'failure')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "::warning::Deleting tag ${{ github.ref_name }} due to validation failure (folder structure or metadata). A new commit is required."
+          gh api -X DELETE repos/${{ github.repository }}/git/refs/tags/${{ github.ref_name }} || echo "Tag deletion failed or already removed"
+
+      - name: Publish GitHub Release (with allow_updates)
+        if: steps.mod.outcome == 'success'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.mod.outputs.tag }}
+          name: "${{ steps.vars.outputs.mod_name }} ${{ steps.mod.outputs.tag }}"
+          body_path: release-body.md
+          files: ${{ steps.mod.outputs.archive }}
+          allow_updates: true
+          append_body: false
+
   post_release:
     needs: release
     runs-on: ubuntu-latest
     steps:
-      # ---------- FALLBACK: update changelog in 7BytesToDie/mods ----------
+      - name: Download release asset from GitHub
+        shell: bash
+        run: |
+          export GH_TOKEN="${{ github.token }}"
+          gh release download "${{ github.ref_name }}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --pattern "*.zip"
+
+      - name: Find the downloaded zip file
+        id: zip
+        run: echo "zip=$(ls *.zip | head -n 1)" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch mod_id from Nexus API (retry up to 5 times)
+        id: nexus_id
+        shell: bash
+        env:
+          MOD_URL: ${{ secrets.NEXUSMODS_MOD_URL }}
+          API_KEY: ${{ secrets.NEXUSMODS_API_KEY }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! "$MOD_URL" =~ https://www\.nexusmods\.com/([^/]+)/mods/([0-9]+) ]]; then
+            echo "::error::Invalid NEXUSMODS_MOD_URL format. Expected: https://www.nexusmods.com/{game}/mods/{id}"
+            exit 1
+          fi
+
+          GAME_DOMAIN="${BASH_REMATCH[1]}"
+          GAME_SCOPED_ID="${BASH_REMATCH[2]}"
+          API_URL="https://api.nexusmods.com/v3/games/${GAME_DOMAIN}/mods/${GAME_SCOPED_ID}"
+
+          for i in {1..5}; do
+            RESPONSE=$(curl -s -H "apikey: $API_KEY" "$API_URL") && break
+            sleep $((2**i))
+          done
+
+          MOD_ID=$(echo "$RESPONSE" | jq -r '.data.id')
+          if [[ -z "$MOD_ID" || "$MOD_ID" == "null" ]]; then
+            echo "::error::Failed to fetch mod_id from Nexus API. Response: $RESPONSE"
+            exit 1
+          fi
+
+          echo "mod_id=$MOD_ID" >> "$GITHUB_OUTPUT"
+          echo "Fetched mod_id: $MOD_ID"
+
+      - name: Upload mod to NexusMods (with graceful duplicate handling)
+        id: nexus_upload
+        uses: Nexus-Mods/upload-action@main
+        with:
+          api_key: ${{ secrets.NEXUSMODS_API_KEY }}
+          file_id: ${{ secrets.NEXUSMODS_FILE_GROUP_ID }}
+          filename: ${{ steps.zip.outputs.zip }}
+          description: "[url=https://raw.githubusercontent.com/7BytesToDie/mods/main/${{ needs.release.outputs.mod_name }}/changelog.md]Full changelog[/url]"
+          version: ${{ needs.release.outputs.version }}
+          changelog: ${{ needs.release.outputs.body }}
+          mod_id: ${{ steps.nexus_id.outputs.mod_id }}
+        continue-on-error: true
+
+      - name: Handle Nexus upload failure (log but don't fail)
+        if: steps.nexus_upload.outcome == 'failure'
+        run: |
+          echo "::warning::Nexus upload failed. This is usually because version ${{ needs.release.outputs.version }} already exists. Continuing anyway."
+
       - name: Checkout release notes repository
         uses: actions/checkout@v6
         with:
@@ -71,6 +162,7 @@ jobs:
           path: notes
 
       - name: Update changelog (prepend new version)
+        if: steps.nexus_upload.outcome != 'failure'
         shell: bash
         env:
           MOD_NAME: ${{ needs.release.outputs.mod_name }}
@@ -99,6 +191,7 @@ jobs:
           rm -f "$NEW_ENTRY_FILE"
 
       - name: Commit and push changelog
+        if: steps.nexus_upload.outcome != 'failure'
         shell: bash
         run: |
           set -euo pipefail
@@ -110,61 +203,16 @@ jobs:
           git commit -m "Add ${{ needs.release.outputs.mod_name }} ${{ needs.release.outputs.version }}"
           git push
 
-      # ---------- DOWNLOAD THE ZIP FROM THE RELEASE ----------
-      - name: Download release asset from GitHub
-        shell: bash
+      - name: Write job summary
+        if: always()
         run: |
-          export GH_TOKEN="${{ github.token }}"
-          gh release download "${{ github.ref_name }}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --pattern "*.zip"
-
-      - name: Find the downloaded zip file
-        id: zip
-        run: echo "zip=$(ls *.zip | head -n 1)" >> "$GITHUB_OUTPUT"
-
-      # ---------- DYNAMICALLY FETCH THE REAL mod_id FROM NEXUS API ----------
-      - name: Fetch mod_id from Nexus API
-        id: nexus_id
-        shell: bash
-        env:
-          MOD_URL: ${{ secrets.NEXUSMODS_MOD_URL }}
-          API_KEY: ${{ secrets.NEXUSMODS_API_KEY }}
-        run: |
-          set -euo pipefail
-
-          # Extract game_domain and game_scoped_id from the URL
-          # Example: https://www.nexusmods.com/7daystodie/mods/9902
-          if [[ ! "$MOD_URL" =~ https://www\.nexusmods\.com/([^/]+)/mods/([0-9]+) ]]; then
-            echo "::error::Invalid NEXUSMODS_MOD_URL format. Expected: https://www.nexusmods.com/{game}/mods/{id}"
-            exit 1
+          echo "## Release summary" >> $GITHUB_STEP_SUMMARY
+          echo "- **Mod**: ${{ needs.release.outputs.mod_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Version**: ${{ needs.release.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **GitHub Release**: ${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Nexus page**: ${{ secrets.NEXUSMODS_MOD_URL }}" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ job.status }}" == "success" ]; then
+            echo "✅ Upload successful" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "⚠️ Workflow partially succeeded (check logs)" >> $GITHUB_STEP_SUMMARY
           fi
-
-          GAME_DOMAIN="${BASH_REMATCH[1]}"
-          GAME_SCOPED_ID="${BASH_REMATCH[2]}"
-
-          API_URL="https://api.nexusmods.com/v3/games/${GAME_DOMAIN}/mods/${GAME_SCOPED_ID}"
-
-          # Fetch the response and extract .data.id
-          RESPONSE=$(curl -s -H "apikey: $API_KEY" "$API_URL")
-          MOD_ID=$(echo "$RESPONSE" | jq -r '.data.id')
-
-          if [[ -z "$MOD_ID" || "$MOD_ID" == "null" ]]; then
-            echo "::error::Failed to fetch mod_id from Nexus API. Response: $RESPONSE"
-            exit 1
-          fi
-
-          echo "mod_id=$MOD_ID" >> "$GITHUB_OUTPUT"
-          echo "Fetched mod_id: $MOD_ID"
-
-      # ---------- UPLOAD TO NEXUS WITH CHANGELOG ----------
-      - name: Upload mod to NexusMods
-        uses: Nexus-Mods/upload-action@main
-        with:
-          api_key: ${{ secrets.NEXUSMODS_API_KEY }}
-          file_id: ${{ secrets.NEXUSMODS_FILE_GROUP_ID }}
-          filename: ${{ steps.zip.outputs.zip }}
-          description: "[url=https://raw.githubusercontent.com/7BytesToDie/mods/main/${{ needs.release.outputs.mod_name }}/changelog.md]Full changelog[/url]"
-          version: ${{ needs.release.outputs.version }}
-          changelog: ${{ needs.release.outputs.body }}
-          mod_id: ${{ steps.nexus_id.outputs.mod_id }}
