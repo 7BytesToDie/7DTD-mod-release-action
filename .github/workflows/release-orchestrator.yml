@@ -49,14 +49,27 @@ jobs:
       - name: Derive mod_name and mod_folder
         id: vars
         run: |
-          repo_name="${GITHUB_REPOSITORY#*/}"
-          echo "mod_name=$repo_name" >> $GITHUB_OUTPUT
+          set -euo pipefail
+          src="${{ inputs.source_dir }}"
 
-          folder=$(ls -d ${{ inputs.source_dir }}/*/ 2>/dev/null | head -n 1 | xargs basename)
-          if [ -z "$folder" ]; then
-            echo "Error: No folder found inside ${{ inputs.source_dir }}/" >&2
+          # Find all subdirectories that contain ModInfo.xml
+          folders=()
+          while IFS= read -r -d '' dir; do
+            if [[ -f "$dir/ModInfo.xml" ]]; then
+              folders+=("$(basename "$dir")")
+            fi
+          done < <(find "$src" -mindepth 1 -maxdepth 1 -type d -print0)
+
+          if [[ ${#folders[@]} -eq 0 ]]; then
+            echo "::error::No subdirectory under '$src' contains a ModInfo.xml."
             exit 1
           fi
+
+          # Sort alphabetically descending and pick the first (the "last")
+          IFS=$'\n' sorted=($(sort -r <<<"${folders[*]}"))
+          folder="${sorted[0]}"
+
+          echo "mod_name=$folder" >> $GITHUB_OUTPUT
           echo "mod_folder=$folder" >> $GITHUB_OUTPUT
 
       - name: Run Mod Release Action
@@ -87,6 +100,15 @@ jobs:
           files: ${{ steps.mod.outputs.archive }}
           allow_updates: true
           append_body: false
+
+      - name: Compute MD5 of the archive
+        id: md5
+        if: steps.mod.outcome == 'success'
+        run: |
+          set -euo pipefail
+          archive="${{ steps.mod.outputs.archive }}"
+          md5sum "$archive" | awk '{ print $1 }' > md5.txt
+          echo "md5=$(cat md5.txt)" >> $GITHUB_OUTPUT
 
   post_release:
     needs: release
@@ -143,10 +165,17 @@ jobs:
           api_key: ${{ secrets.NEXUSMODS_API_KEY }}
           file_id: ${{ secrets.NEXUSMODS_FILE_GROUP_ID }}
           filename: ${{ steps.zip.outputs.zip }}
+          name: ${{ needs.release.outputs.mod_name }}-${{ needs.release.outputs.version }}
           description: "[url=https://raw.githubusercontent.com/7BytesToDie/mods/main/${{ needs.release.outputs.mod_name }}/changelog.md]Full changelog[/url]"
           version: ${{ needs.release.outputs.version }}
           changelog: ${{ needs.release.outputs.body }}
           mod_id: ${{ steps.nexus_id.outputs.mod_id }}
+          primary_mod_manager_download: true
+          allow_mod_manager_download: true
+          archive_existing_file: true
+          update_mod_version: true
+          md5: ${{ needs.md5.outputs.md5 }}
+
         continue-on-error: true
 
       - name: Handle Nexus upload failure (log but don't fail)
