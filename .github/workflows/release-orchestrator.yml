@@ -75,7 +75,7 @@ jobs:
 
       - name: Run Mod Release Action
         id: mod
-        uses: 7BytesToDie/7DTD-mod-release-action@v1
+        uses: 7BytesToDie/7DTD-mod-release-action@main
         with:
           mod_name:   ${{ steps.vars.outputs.mod_name }}
           mod_folder: ${{ steps.vars.outputs.mod_folder }}
