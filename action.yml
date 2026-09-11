@@ -18,6 +18,8 @@ inputs:
 outputs:
   version:
     value: ${{ steps.metadata.outputs.version }}
+  archive:
+    value: ${{ steps.metadata.outputs.archive }}
   body:
     value: ${{ steps.metadata.outputs.body }}
 
@@ -29,8 +31,12 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        sudo apt-get update
-        sudo apt-get install -y libxml2-utils
+        # No-op when the orchestrator has already cached libxml2-utils;
+        # keeps the action usable standalone.
+        command -v xmllint >/dev/null || {
+          sudo apt-get update
+          sudo apt-get install -y libxml2-utils
+        }
 
     - name: Prepare metadata
       id: metadata
@@ -114,3 +120,4 @@ runs:
         name: "${{ inputs.mod_name }} ${{ steps.metadata.outputs.tag }}"
         body_path: release-body.md
         files: ${{ steps.metadata.outputs.archive }}
+        allow_updates: true

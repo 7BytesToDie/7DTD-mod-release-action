@@ -34,6 +34,7 @@ jobs:
       version:  ${{ steps.mod.outputs.version }}
       body:     ${{ steps.mod.outputs.body }}
       mod_name: ${{ steps.vars.outputs.mod_name }}
+      md5:      ${{ steps.md5.outputs.md5 }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -65,12 +66,12 @@ jobs:
             exit 1
           fi
 
-          # Sort alphabetically descending and pick the first (the "last")
-          IFS=$'\n' sorted=($(sort -r <<<"${folders[*]}"))
-          folder="${sorted[0]}"
+          # Sort alphabetically descending and pick the first (the "last").
+          # printf avoids word-splitting on folder names containing spaces.
+          folder="$(printf '%s\n' "${folders[@]}" | sort -r | head -n1)"
 
-          echo "mod_name=$folder" >> $GITHUB_OUTPUT
-          echo "mod_folder=$folder" >> $GITHUB_OUTPUT
+          echo "mod_name=$folder"   >> "$GITHUB_OUTPUT"
+          echo "mod_folder=$folder" >> "$GITHUB_OUTPUT"
 
       - name: Run Mod Release Action
         id: mod
@@ -81,25 +82,14 @@ jobs:
           source_dir: ${{ inputs.source_dir }}
           tag_name:   ${{ github.ref_name }}
 
-      - name: Delete tag on validation failure (requires new commit)
-        if: failure() && (steps.vars.outcome == 'failure' || steps.mod.outcome == 'failure')
+      - name: Delete tag on failure (requires new commit + push)
+        if: failure()
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          echo "::warning::Deleting tag ${{ github.ref_name }} due to validation failure (folder structure or metadata). A new commit is required."
+          echo "::warning::Deleting tag ${{ github.ref_name }} due to failure. Fix locally, then re-push the tag."
           gh api -X DELETE repos/${{ github.repository }}/git/refs/tags/${{ github.ref_name }} || echo "Tag deletion failed or already removed"
-
-      - name: Publish GitHub Release (with allow_updates)
-        if: steps.mod.outcome == 'success'
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.mod.outputs.tag }}
-          name: "${{ steps.vars.outputs.mod_name }} ${{ steps.mod.outputs.tag }}"
-          body_path: release-body.md
-          files: ${{ steps.mod.outputs.archive }}
-          allow_updates: true
-          append_body: false
 
       - name: Compute MD5 of the archive
         id: md5
@@ -107,8 +97,7 @@ jobs:
         run: |
           set -euo pipefail
           archive="${{ steps.mod.outputs.archive }}"
-          md5sum "$archive" | awk '{ print $1 }' > md5.txt
-          echo "md5=$(cat md5.txt)" >> $GITHUB_OUTPUT
+          echo "md5=$(md5sum "$archive" | awk '{ print $1 }')" >> "$GITHUB_OUTPUT"
 
   post_release:
     needs: release
@@ -144,14 +133,20 @@ jobs:
           GAME_SCOPED_ID="${BASH_REMATCH[2]}"
           API_URL="https://api.nexusmods.com/v3/games/${GAME_DOMAIN}/mods/${GAME_SCOPED_ID}"
 
+          RESPONSE=""
+          MOD_ID=""
           for i in {1..5}; do
-            RESPONSE=$(curl -s -H "apikey: $API_KEY" "$API_URL") && break
-            sleep $((2**i))
+            # curl -f fails on HTTP 4xx/5xx so the loop actually retries
+            # instead of exiting on the first response.
+            if RESPONSE="$(curl -sf -H "apikey: $API_KEY" "$API_URL")"; then
+              MOD_ID="$(echo "$RESPONSE" | jq -r '.data.id // empty')"
+              [[ -n "$MOD_ID" ]] && break
+            fi
+            (( i < 5 )) && sleep $(( 2 ** i )) || true
           done
 
-          MOD_ID=$(echo "$RESPONSE" | jq -r '.data.id')
-          if [[ -z "$MOD_ID" || "$MOD_ID" == "null" ]]; then
-            echo "::error::Failed to fetch mod_id from Nexus API. Response: $RESPONSE"
+          if [[ -z "$MOD_ID" ]]; then
+            echo "::error::Failed to fetch mod_id from Nexus API. Last response: ${RESPONSE:-<empty>}"
             exit 1
           fi
 
@@ -174,7 +169,7 @@ jobs:
           allow_mod_manager_download: true
           archive_existing_file: true
           update_mod_version: true
-          md5: ${{ needs.md5.outputs.md5 }}
+          md5: ${{ needs.release.outputs.md5 }}
 
         continue-on-error: true
 
@@ -204,12 +199,14 @@ jobs:
           mkdir -p "$MOD_DIR"
 
           NEW_ENTRY_FILE="${CHANGELOG}.new"
-          cat > "$NEW_ENTRY_FILE" <<EOF
+          # Non-EOF delimiter so a release body containing "EOF" on its
+          # own line cannot terminate the heredoc early.
+          cat > "$NEW_ENTRY_FILE" <<CHANGELOG_ENTRY_EOF
           # ${MOD_NAME} ${VERSION}
 
           ${BODY}
 
-          EOF
+          CHANGELOG_ENTRY_EOF
 
           if [ -f "$CHANGELOG" ]; then
             cat "$NEW_ENTRY_FILE" "$CHANGELOG" > "${CHANGELOG}.tmp"
