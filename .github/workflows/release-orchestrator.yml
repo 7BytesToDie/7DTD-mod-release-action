@@ -31,10 +31,11 @@ jobs:
   release:
     runs-on: ubuntu-latest
     outputs:
-      version:  ${{ steps.mod.outputs.version }}
-      body:     ${{ steps.mod.outputs.body }}
-      mod_name: ${{ steps.vars.outputs.mod_name }}
-      md5:      ${{ steps.md5.outputs.md5 }}
+      version:        ${{ steps.mod.outputs.version }}
+      body:           ${{ steps.mod.outputs.body }}
+      mod_name:       ${{ steps.vars.outputs.mod_name }}
+      changelog_name: ${{ steps.vars.outputs.changelog_name }}
+      md5:            ${{ steps.md5.outputs.md5 }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -47,7 +48,7 @@ jobs:
           packages: libxml2-utils
           version: 1.0
 
-      - name: Derive mod_name and mod_folder
+      - name: Derive mod_name, mod_folder, changelog_name
         id: vars
         run: |
           set -euo pipefail
@@ -67,11 +68,18 @@ jobs:
           fi
 
           # Sort alphabetically descending and pick the first (the "last").
-          # printf avoids word-splitting on folder names containing spaces.
           folder="$(printf '%s\n' "${folders[@]}" | sort -r | head -n1)"
 
-          echo "mod_name=$folder"   >> "$GITHUB_OUTPUT"
-          echo "mod_folder=$folder" >> "$GITHUB_OUTPUT"
+          # The folder name identifies the mod in the source tree (used for
+          # building and validating the archive, and for release titles).
+          # The repository name is the stable identity used for the docs
+          # repo changelog path, so that renaming the folder in the source
+          # tree does not split the changelog across multiple directories.
+          changelog_name="${GITHUB_REPOSITORY##*/}"
+
+          echo "mod_name=$folder"               >> "$GITHUB_OUTPUT"
+          echo "mod_folder=$folder"             >> "$GITHUB_OUTPUT"
+          echo "changelog_name=$changelog_name" >> "$GITHUB_OUTPUT"
 
       - name: Run Mod Release Action
         id: mod
@@ -136,8 +144,6 @@ jobs:
           RESPONSE=""
           MOD_ID=""
           for i in {1..5}; do
-            # curl -f fails on HTTP 4xx/5xx so the loop actually retries
-            # instead of exiting on the first response.
             if RESPONSE="$(curl -sf -H "apikey: $API_KEY" "$API_URL")"; then
               MOD_ID="$(echo "$RESPONSE" | jq -r '.data.id // empty')"
               [[ -n "$MOD_ID" ]] && break
@@ -161,7 +167,7 @@ jobs:
           file_id: ${{ secrets.NEXUSMODS_FILE_GROUP_ID }}
           filename: ${{ steps.zip.outputs.zip }}
           name: ${{ needs.release.outputs.mod_name }}-${{ needs.release.outputs.version }}
-          description: "[url=https://raw.githubusercontent.com/7BytesToDie/mods/main/${{ needs.release.outputs.mod_name }}/changelog.md]Full changelog[/url]"
+          description: "[url=https://raw.githubusercontent.com/7BytesToDie/mods/main/${{ needs.release.outputs.changelog_name }}/changelog.md]Full changelog[/url]"
           version: ${{ needs.release.outputs.version }}
           changelog: ${{ needs.release.outputs.body }}
           mod_id: ${{ steps.nexus_id.outputs.mod_id }}
@@ -189,18 +195,17 @@ jobs:
         if: steps.nexus_upload.outcome != 'failure'
         shell: bash
         env:
-          MOD_NAME: ${{ needs.release.outputs.mod_name }}
-          VERSION:  ${{ needs.release.outputs.version }}
-          BODY:     ${{ needs.release.outputs.body }}
+          MOD_NAME:       ${{ needs.release.outputs.mod_name }}
+          CHANGELOG_NAME: ${{ needs.release.outputs.changelog_name }}
+          VERSION:        ${{ needs.release.outputs.version }}
+          BODY:           ${{ needs.release.outputs.body }}
         run: |
           set -euo pipefail
-          MOD_DIR="notes/${MOD_NAME}"
+          MOD_DIR="notes/${CHANGELOG_NAME}"
           CHANGELOG="${MOD_DIR}/changelog.md"
           mkdir -p "$MOD_DIR"
 
           NEW_ENTRY_FILE="${CHANGELOG}.new"
-          # Non-EOF delimiter so a release body containing "EOF" on its
-          # own line cannot terminate the heredoc early.
           cat > "$NEW_ENTRY_FILE" <<CHANGELOG_ENTRY_EOF
           # ${MOD_NAME} ${VERSION}
 
@@ -226,7 +231,7 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add .
           git diff --cached --quiet && exit 0
-          git commit -m "Add ${{ needs.release.outputs.mod_name }} ${{ needs.release.outputs.version }}"
+          git commit -m "Add ${{ needs.release.outputs.changelog_name }} ${{ needs.release.outputs.version }}"
           git push
 
       - name: Write job summary
