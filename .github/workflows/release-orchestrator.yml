@@ -28,8 +28,37 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  release:
+  detect:
     runs-on: ubuntu-latest
+    outputs:
+      runs_on: ${{ steps.pick.outputs.runs_on }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Pick runner
+        id: pick
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t found < <(
+            find . -name '*.csproj' -type f \
+              -not -path '*/bin/*' -not -path '*/obj/*' \
+              -not -path '*/packages/*'
+          )
+          if [[ ${#found[@]} -gt 0 ]]; then
+            echo "runs_on=windows-latest" >> "$GITHUB_OUTPUT"
+            echo "Detected .csproj; building on windows-latest"
+          else
+            echo "runs_on=ubuntu-latest" >> "$GITHUB_OUTPUT"
+            echo "No .csproj; building on ubuntu-latest"
+          fi
+
+  release:
+    needs: detect
+    runs-on: ${{ needs.detect.outputs.runs_on }}
     outputs:
       version:        ${{ steps.mod.outputs.version }}
       body:           ${{ steps.mod.outputs.body }}
@@ -43,6 +72,7 @@ jobs:
           fetch-depth: 0
 
       - name: Cache apt packages
+        if: runner.os == 'Linux'
         uses: awalsh128/cache-apt-pkgs-action@latest
         with:
           packages: libxml2-utils
@@ -103,6 +133,7 @@ jobs:
       - name: Compute MD5 of the archive
         id: md5
         if: steps.mod.outcome == 'success'
+        shell: bash
         run: |
           set -euo pipefail
           archive="${{ steps.mod.outputs.archive }}"
@@ -244,7 +275,7 @@ jobs:
           echo "- **GitHub Release**: ${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Nexus page**: ${{ secrets.NEXUSMODS_MOD_URL }}" >> $GITHUB_STEP_SUMMARY
           if [ "${{ job.status }}" == "success" ]; then
-            echo "✅ Upload successful" >> $GITHUB_STEP_SUMMARY
+            echo "Upload successful" >> $GITHUB_STEP_SUMMARY
           else
-            echo "⚠️ Workflow partially succeeded (check logs)" >> $GITHUB_STEP_SUMMARY
+            echo "Workflow partially succeeded (check logs)" >> $GITHUB_STEP_SUMMARY
           fi

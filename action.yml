@@ -44,7 +44,8 @@ runs:
   using: composite
 
   steps:
-    - name: Install XML tools
+    - name: Install XML and archive tools (Linux)
+      if: runner.os == 'Linux'
       shell: bash
       run: |
         set -euo pipefail
@@ -54,6 +55,14 @@ runs:
           sudo apt-get update
           sudo apt-get install -y libxml2-utils
         }
+
+    - name: Install XML and archive tools (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        # libxml2 provides xmllint.exe; zip and unzip are not in Git Bash.
+        # Git Bash finds them via PATH after install.
+        choco install --no-progress -y libxml2 zip unzip
 
     - name: Prepare metadata
       id: metadata
