@@ -89,6 +89,7 @@ jobs:
           mod_folder: ${{ steps.vars.outputs.mod_folder }}
           source_dir: ${{ inputs.source_dir }}
           tag_name:   ${{ github.ref_name }}
+          refs_token: ${{ secrets.RELEASE_NOTES_TOKEN }}
 
       - name: Delete tag on failure (requires new commit + push)
         if: failure()

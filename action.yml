@@ -15,6 +15,23 @@ inputs:
   tag_name:
     required: true
 
+  csproj:
+    required: false
+    description: |
+      Path to the .csproj to build, relative to the repository root.
+      Leave empty to auto-detect a single .csproj outside bin/ and obj/.
+      If none is found, the build steps are skipped (XML-only mods).
+
+  refs_repo:
+    required: false
+    default: 7BytesToDie/7dtd-refs
+
+  refs_token:
+    required: true
+    description: |
+      Token with read access to the refs repo's release assets.
+      Must be a fine-grained PAT or classic PAT scoped to that repo.
+
 outputs:
   version:
     value: ${{ steps.metadata.outputs.version }}
@@ -89,6 +106,91 @@ runs:
           cat release-body.md
           echo "EOF"
         } >> "$GITHUB_OUTPUT"
+
+    - name: Locate .csproj
+      id: csproj
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        if [[ -n "${{ inputs.csproj }}" ]]; then
+          path="${{ inputs.csproj }}"
+          if [[ ! -f "$path" ]]; then
+            echo "::error::csproj not found: $path"
+            exit 1
+          fi
+        else
+          mapfile -t found < <(
+            find . -name '*.csproj' -type f \
+              -not -path '*/bin/*' -not -path '*/obj/*' \
+              -not -path '*/packages/*'
+          )
+          if [[ ${#found[@]} -eq 0 ]]; then
+            echo "No .csproj found; skipping build steps."
+            echo "path=" >> "$GITHUB_OUTPUT"
+            exit 0
+          elif [[ ${#found[@]} -gt 1 ]]; then
+            echo "::error::Multiple .csproj found; set the 'csproj' input explicitly:"
+            printf '  %s\n' "${found[@]}"
+            exit 1
+          fi
+          path="${found[0]}"
+        fi
+
+        echo "path=$path" >> "$GITHUB_OUTPUT"
+        echo "Using csproj: $path"
+
+    - name: Setup .NET
+      if: steps.csproj.outputs.path != ''
+      uses: actions/setup-dotnet@v4
+      with:
+        # Reads the SDK version from the mod repo's global.json.
+        # Fails if the file is missing, which is correct: reproducibility
+        # requires every build to know which SDK it uses.
+        global-json-file: ./global.json
+
+    - name: Download 7DTD reference assemblies
+      if: steps.csproj.outputs.path != ''
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.refs_token }}
+      run: |
+        set -euo pipefail
+        mkdir -p "$RUNNER_TEMP/refs"
+        gh release download \
+          --repo "${{ inputs.refs_repo }}" \
+          --dir "$RUNNER_TEMP/refs" \
+          --pattern '*.dll'
+        count=$(ls -1 "$RUNNER_TEMP/refs"/*.dll | wc -l)
+        echo "Downloaded $count reference assemblies."
+
+    - name: Build mod
+      if: steps.csproj.outputs.path != ''
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        CSPROJ="${{ steps.csproj.outputs.path }}"
+        DLL_NAME="$(basename "$CSPROJ" .csproj).dll"
+        DEST="${{ inputs.source_dir }}/${{ inputs.mod_folder }}/$DLL_NAME"
+
+        dotnet build "$CSPROJ" \
+          -c Release \
+          -p:SevenDTDRefs="$RUNNER_TEMP/refs"
+
+        # Find the newest matching DLL under bin/Release, regardless of TFM.
+        DLL_PATH=$(find "$(dirname "$CSPROJ")/bin/Release" \
+          -name "$DLL_NAME" -type f -printf '%T@ %p\n' \
+          | sort -rn | head -n1 | cut -d' ' -f2-)
+
+        if [[ -z "$DLL_PATH" ]]; then
+          echo "::error::Build produced no $DLL_NAME under bin/Release."
+          exit 1
+        fi
+
+        cp "$DLL_PATH" "$DEST"
+        echo "Staged $DLL_PATH -> $DEST"
+        echo "SHA256: $(sha256sum "$DEST" | cut -d' ' -f1)"
 
     - name: Build archive
       shell: bash
