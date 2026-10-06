@@ -56,10 +56,18 @@ runs:
           sudo apt-get install -y libxml2-utils
         }
 
+    - name: Cache Chocolatey packages
+      if: runner.os == 'Windows'
+      uses: actions/cache@v6
+      with:
+        path: ${{ github.workspace }}\chocolatey_cache
+        key: ${{ runner.os }}-choco-${{ env.ImageOS }}-v1
+
     - name: Install XML and archive tools (Windows)
       if: runner.os == 'Windows'
       shell: pwsh
       run: |
+        choco config set cacheLocation --value "$Env:GITHUB_WORKSPACE\chocolatey_cache"
         # libxml2 provides xmllint.exe; zip and unzip are not in Git Bash.
         # Git Bash finds them via PATH after install.
         choco install --no-progress -y libxml2 zip unzip
@@ -107,13 +115,16 @@ runs:
           exit 1
         fi
 
+        # Random-looking delimiter, so a release body containing a
+        # line reading exactly 'EOF' cannot truncate the output.
+        DELIM="RELEASE_BODY_${RANDOM}_${RANDOM}_${RANDOM}"
         {
           echo "tag=$TAG"
           echo "version=$VERSION"
           echo "archive=$ARCHIVE"
-          echo "body<<EOF"
+          echo "body<<$DELIM"
           cat release-body.md
-          echo "EOF"
+          echo "$DELIM"
         } >> "$GITHUB_OUTPUT"
 
     - name: Locate .csproj
@@ -151,11 +162,12 @@ runs:
 
     - name: Setup .NET
       if: steps.csproj.outputs.path != ''
-      uses: actions/setup-dotnet@v4
+      uses: actions/setup-dotnet@v6
       with:
-        # Reads the SDK version from the mod repo's global.json.
-        # Fails if the file is missing, which is correct: reproducibility
-        # requires every build to know which SDK it uses.
+        # Runs only when a .csproj was found; XML-only mods skip this
+        # step entirely. Reads the SDK version from the mod repo's
+        # global.json, and fails if the file is missing when a .csproj
+        # *is* present: a build requires knowing which SDK it uses.
         global-json-file: ./global.json
 
     - name: Download 7DTD reference assemblies
@@ -225,7 +237,7 @@ runs:
           }
 
     - name: Publish GitHub Release
-      uses: softprops/action-gh-release@v2
+      uses: softprops/action-gh-release@v3
       with:
         tag_name: ${{ steps.metadata.outputs.tag }}
         name: "${{ inputs.mod_name }} ${{ steps.metadata.outputs.tag }}"

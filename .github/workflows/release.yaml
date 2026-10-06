@@ -8,6 +8,11 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Tag to release (must already exist, e.g. v5.0.0)'
+        required: true
+        type: string
 
 permissions:
   contents: write   # required for the reusable workflow to create the release
@@ -17,6 +22,9 @@ jobs:
     uses: 7BytesToDie/7DTD-mod-release-action/.github/workflows/release-orchestrator.yml@main
     with:
       source_dir: mod
+      # On a tag push, inputs is empty and github.ref_name is the tag.
+      # On workflow_dispatch, inputs.tag_name is the operator's choice.
+      tag_name: ${{ inputs.tag_name || github.ref_name }}
     secrets:
       RELEASE_NOTES_TOKEN: ${{ secrets.RELEASE_NOTES_TOKEN }}
       NEXUSMODS_API_KEY: ${{ secrets.NEXUSMODS_API_KEY }}

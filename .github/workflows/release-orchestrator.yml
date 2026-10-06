@@ -10,6 +10,9 @@ on:
         required: false
         type: string
         default: mod
+      tag_name:
+        required: true
+        type: string
     secrets:
       RELEASE_NOTES_TOKEN:
         required: true
@@ -24,7 +27,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: release-${{ github.ref_name }}
+  group: release-${{ inputs.tag_name }}
   cancel-in-progress: true
 
 jobs:
@@ -73,13 +76,14 @@ jobs:
 
       - name: Cache apt packages
         if: runner.os == 'Linux'
-        uses: awalsh128/cache-apt-pkgs-action@latest
+        uses: awalsh128/cache-apt-pkgs-action@v1.6.3
         with:
           packages: libxml2-utils
           version: 1.0
 
       - name: Derive mod_name, mod_folder, changelog_name
         id: vars
+        shell: bash
         run: |
           set -euo pipefail
           src="${{ inputs.source_dir }}"
@@ -118,17 +122,17 @@ jobs:
           mod_name:   ${{ steps.vars.outputs.mod_name }}
           mod_folder: ${{ steps.vars.outputs.mod_folder }}
           source_dir: ${{ inputs.source_dir }}
-          tag_name:   ${{ github.ref_name }}
+          tag_name:   ${{ inputs.tag_name }}
           refs_token: ${{ secrets.RELEASE_NOTES_TOKEN }}
 
-      - name: Delete tag on failure (requires new commit + push)
-        if: failure()
+      - name: Delete tag on failure or cancellation (re-push to retry)
+        if: failure() || cancelled()
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          echo "::warning::Deleting tag ${{ github.ref_name }} due to failure. Fix locally, then re-push the tag."
-          gh api -X DELETE repos/${{ github.repository }}/git/refs/tags/${{ github.ref_name }} || echo "Tag deletion failed or already removed"
+          echo "::warning::Deleting tag ${{ inputs.tag_name }} due to failure. Fix locally, then re-push the tag."
+          gh api -X DELETE repos/${{ github.repository }}/git/refs/tags/${{ inputs.tag_name }} || echo "Tag deletion failed or already removed"
 
       - name: Compute MD5 of the archive
         id: md5
@@ -142,17 +146,24 @@ jobs:
   post_release:
     needs: release
     runs-on: ubuntu-latest
+    # The notes repo is a single shared resource; two tags finishing
+    # at the same time would race on its changelog push. The release
+    # job above stays per-tag and parallel.
+    concurrency:
+      group: release-notes-writer
+      cancel-in-progress: false
     steps:
       - name: Download release asset from GitHub
         shell: bash
         run: |
           export GH_TOKEN="${{ github.token }}"
-          gh release download "${{ github.ref_name }}" \
+          gh release download "${{ inputs.tag_name }}" \
             --repo "${GITHUB_REPOSITORY}" \
             --pattern "*.zip"
 
       - name: Find the downloaded zip file
         id: zip
+        shell: bash
         run: echo "zip=$(ls *.zip | head -n 1)" >> "$GITHUB_OUTPUT"
 
       - name: Fetch mod_id from Nexus API (retry up to 5 times)
@@ -177,7 +188,7 @@ jobs:
           MOD_ID=""
           for i in {1..5}; do
             if RESPONSE="$(curl -sf -H "apikey: $API_KEY" "$API_URL")"; then
-              MOD_ID="$(echo "$RESPONSE" | jq -r '.data.id // empty')"
+              MOD_ID="$(echo "$RESPONSE" | jq -r '.data.game_scoped_id // empty')"
               [[ -n "$MOD_ID" ]] && break
             fi
             (( i < 5 )) && sleep $(( 2 ** i )) || true
@@ -193,7 +204,7 @@ jobs:
 
       - name: Upload mod to NexusMods (with graceful duplicate handling)
         id: nexus_upload
-        uses: Nexus-Mods/upload-action@main
+        uses: Nexus-Mods/upload-action@v1.0.0-beta.9
         with:
           api_key: ${{ secrets.NEXUSMODS_API_KEY }}
           file_id: ${{ secrets.NEXUSMODS_FILE_GROUP_ID }}
@@ -213,6 +224,7 @@ jobs:
 
       - name: Handle Nexus upload failure (log but don't fail)
         if: steps.nexus_upload.outcome == 'failure'
+        shell: bash
         run: |
           echo "::warning::Nexus upload failed. This is usually because version ${{ needs.release.outputs.version }} already exists. Continuing anyway."
 
@@ -236,6 +248,14 @@ jobs:
           MOD_DIR="notes/${CHANGELOG_NAME}"
           CHANGELOG="${MOD_DIR}/changelog.md"
           mkdir -p "$MOD_DIR"
+
+          # A re-run of the workflow for the same tag must not
+          # duplicate the entry. Whole-line match avoids a false hit
+          # on a hypothetical 'v5.0.0-beta' when 'v5.0.0' is present.
+          if [ -f "$CHANGELOG" ] && grep -qxF "# ${MOD_NAME} ${VERSION}" "$CHANGELOG"; then
+            echo "Version ${VERSION} already present in ${CHANGELOG}; skipping."
+            exit 0
+          fi
 
           NEW_ENTRY_FILE="${CHANGELOG}.new"
           cat > "$NEW_ENTRY_FILE" <<CHANGELOG_ENTRY_EOF
@@ -268,14 +288,15 @@ jobs:
 
       - name: Write job summary
         if: always()
+        shell: bash
         run: |
           echo "## Release summary" >> $GITHUB_STEP_SUMMARY
           echo "- **Mod**: ${{ needs.release.outputs.mod_name }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Version**: ${{ needs.release.outputs.version }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **GitHub Release**: ${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **GitHub Release**: ${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ inputs.tag_name }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Nexus page**: ${{ secrets.NEXUSMODS_MOD_URL }}" >> $GITHUB_STEP_SUMMARY
-          if [ "${{ job.status }}" == "success" ]; then
-            echo "Upload successful" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ steps.nexus_upload.outcome }}" == "failure" ]; then
+            echo "Nexus upload failed (see earlier warning); changelog was not updated." >> $GITHUB_STEP_SUMMARY
           else
-            echo "Workflow partially succeeded (check logs)" >> $GITHUB_STEP_SUMMARY
+            echo "Upload successful" >> $GITHUB_STEP_SUMMARY
           fi
