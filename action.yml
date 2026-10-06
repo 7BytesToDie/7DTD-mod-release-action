@@ -70,7 +70,7 @@ runs:
         choco config set cacheLocation --value "$Env:GITHUB_WORKSPACE\chocolatey_cache"
         # libxml2 provides xmllint.exe; zip and unzip are not in Git Bash.
         # Git Bash finds them via PATH after install.
-        choco install --no-progress -y libxml2 zip unzip
+        choco install --no-progress -y zip unzip
 
     - name: Prepare metadata
       id: metadata
@@ -99,8 +99,10 @@ runs:
           exit 1
         }
 
+        # Python instead of xmllint: the libxml2 Chocolatey package no
+        # longer resolves, and Python ships on every GitHub runner.
         XML_VERSION="$(
-          xmllint --xpath 'string(/xml/Version/@value)' "$MODINFO"
+          python3 -c 'import sys, xml.etree.ElementTree as ET; v = ET.parse(sys.argv[1]).getroot().find("Version"); print(v.attrib.get("value", "") if v is not None else "")' "$MODINFO"
         )"
 
         test -n "$XML_VERSION" || {
