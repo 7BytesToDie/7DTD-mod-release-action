@@ -10,8 +10,10 @@ on:
         required: false
         type: string
         default: mod
+      # Optional: callers that omit this (existing mod-repo callers)
+      # fall back to github.ref_name, which is the tag on a tag push.
       tag_name:
-        required: true
+        required: false
         type: string
     secrets:
       RELEASE_NOTES_TOKEN:
@@ -27,7 +29,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: release-${{ inputs.tag_name }}
+  group: release-${{ inputs.tag_name || github.ref_name }}
   cancel-in-progress: true
 
 jobs:
@@ -122,7 +124,7 @@ jobs:
           mod_name:   ${{ steps.vars.outputs.mod_name }}
           mod_folder: ${{ steps.vars.outputs.mod_folder }}
           source_dir: ${{ inputs.source_dir }}
-          tag_name:   ${{ inputs.tag_name }}
+          tag_name:   ${{ inputs.tag_name || github.ref_name }}
           refs_token: ${{ secrets.RELEASE_NOTES_TOKEN }}
 
       - name: Delete tag on failure or cancellation (re-push to retry)
@@ -131,8 +133,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          echo "::warning::Deleting tag ${{ inputs.tag_name }} due to failure. Fix locally, then re-push the tag."
-          gh api -X DELETE repos/${{ github.repository }}/git/refs/tags/${{ inputs.tag_name }} || echo "Tag deletion failed or already removed"
+          echo "::warning::Deleting tag ${{ inputs.tag_name || github.ref_name }} due to failure. Fix locally, then re-push the tag."
+          gh api -X DELETE repos/${{ github.repository }}/git/refs/tags/${{ inputs.tag_name || github.ref_name }} || echo "Tag deletion failed or already removed"
 
       - name: Compute MD5 of the archive
         id: md5
@@ -157,7 +159,7 @@ jobs:
         shell: bash
         run: |
           export GH_TOKEN="${{ github.token }}"
-          gh release download "${{ inputs.tag_name }}" \
+          gh release download "${{ inputs.tag_name || github.ref_name }}" \
             --repo "${GITHUB_REPOSITORY}" \
             --pattern "*.zip"
 
@@ -293,7 +295,7 @@ jobs:
           echo "## Release summary" >> $GITHUB_STEP_SUMMARY
           echo "- **Mod**: ${{ needs.release.outputs.mod_name }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Version**: ${{ needs.release.outputs.version }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **GitHub Release**: ${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ inputs.tag_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **GitHub Release**: ${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ inputs.tag_name || github.ref_name }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Nexus page**: ${{ secrets.NEXUSMODS_MOD_URL }}" >> $GITHUB_STEP_SUMMARY
           if [ "${{ steps.nexus_upload.outcome }}" == "failure" ]; then
             echo "Nexus upload failed (see earlier warning); changelog was not updated." >> $GITHUB_STEP_SUMMARY
