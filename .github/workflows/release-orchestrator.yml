@@ -145,15 +145,12 @@ jobs:
           archive="${{ steps.mod.outputs.archive }}"
           echo "md5=$(md5sum "$archive" | awk '{ print $1 }')" >> "$GITHUB_OUTPUT"
 
-  post_release:
+  nexus_upload:
     needs: release
     runs-on: ubuntu-latest
-    # The notes repo is a single shared resource; two tags finishing
-    # at the same time would race on its changelog push. The release
-    # job above stays per-tag and parallel.
-    concurrency:
-      group: release-notes-writer
-      cancel-in-progress: false
+    outputs:
+      result:     ${{ steps.nexus_upload.outcome }}
+      version_id: ${{ steps.nexus_upload.outputs.version_id }}
     steps:
       - name: Download release asset from GitHub
         shell: bash
@@ -204,32 +201,31 @@ jobs:
           echo "mod_id=$MOD_ID" >> "$GITHUB_OUTPUT"
           echo "Fetched mod_id: $MOD_ID"
 
-      - name: Upload mod to NexusMods (with graceful duplicate handling)
+      - name: Upload mod to NexusMods
         id: nexus_upload
-        uses: Nexus-Mods/upload-action@v1.0.0-beta.9
+        uses: Nexus-Mods/upload-action@v1.0.0-beta.10
         with:
           api_key: ${{ secrets.NEXUSMODS_API_KEY }}
           file_id: ${{ secrets.NEXUSMODS_FILE_GROUP_ID }}
           filename: ${{ steps.zip.outputs.zip }}
-          name: ${{ needs.release.outputs.mod_name }}-${{ needs.release.outputs.version }}
+          display_name: ${{ needs.release.outputs.mod_name }}-${{ needs.release.outputs.version }}
           description: "[url=https://raw.githubusercontent.com/7BytesToDie/mods/main/${{ needs.release.outputs.changelog_name }}/changelog.md]Full changelog[/url]"
           version: ${{ needs.release.outputs.version }}
           changelog: ${{ needs.release.outputs.body }}
           mod_id: ${{ steps.nexus_id.outputs.mod_id }}
           primary_mod_manager_download: true
           allow_mod_manager_download: true
-          archive_existing_file: true
+          archive_existing_version: true
           update_mod_version: true
-          md5: ${{ needs.release.outputs.md5 }}
 
-        continue-on-error: true
-
-      - name: Handle Nexus upload failure (log but don't fail)
-        if: steps.nexus_upload.outcome == 'failure'
-        shell: bash
-        run: |
-          echo "::warning::Nexus upload failed. This is usually because version ${{ needs.release.outputs.version }} already exists. Continuing anyway."
-
+  changelog:
+    needs: [release, nexus_upload]
+    if: always() && needs.release.result == 'success'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: release-notes-writer
+      cancel-in-progress: false
+    steps:
       - name: Checkout release notes repository
         uses: actions/checkout@v6
         with:
@@ -238,7 +234,6 @@ jobs:
           path: notes
 
       - name: Update changelog (prepend new version)
-        if: steps.nexus_upload.outcome != 'failure'
         shell: bash
         env:
           MOD_NAME:       ${{ needs.release.outputs.mod_name }}
@@ -251,9 +246,6 @@ jobs:
           CHANGELOG="${MOD_DIR}/changelog.md"
           mkdir -p "$MOD_DIR"
 
-          # A re-run of the workflow for the same tag must not
-          # duplicate the entry. Whole-line match avoids a false hit
-          # on a hypothetical 'v5.0.0-beta' when 'v5.0.0' is present.
           if [ -f "$CHANGELOG" ] && grep -qxF "# ${MOD_NAME} ${VERSION}" "$CHANGELOG"; then
             echo "Version ${VERSION} already present in ${CHANGELOG}; skipping."
             exit 0
@@ -276,7 +268,6 @@ jobs:
           rm -f "$NEW_ENTRY_FILE"
 
       - name: Commit and push changelog
-        if: steps.nexus_upload.outcome != 'failure'
         shell: bash
         run: |
           set -euo pipefail
@@ -297,8 +288,8 @@ jobs:
           echo "- **Version**: ${{ needs.release.outputs.version }}" >> $GITHUB_STEP_SUMMARY
           echo "- **GitHub Release**: ${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ inputs.tag_name || github.ref_name }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Nexus page**: ${{ secrets.NEXUSMODS_MOD_URL }}" >> $GITHUB_STEP_SUMMARY
-          if [ "${{ steps.nexus_upload.outcome }}" == "failure" ]; then
-            echo "Nexus upload failed (see earlier warning); changelog was not updated." >> $GITHUB_STEP_SUMMARY
+          if [ "${{ needs.nexus_upload.outputs.result }}" == "failure" ]; then
+            echo "- **Nexus upload**: failed (see warnings above)" >> $GITHUB_STEP_SUMMARY
           else
-            echo "Upload successful" >> $GITHUB_STEP_SUMMARY
+            echo "- **Nexus version ID**: ${{ needs.nexus_upload.outputs.version_id }}" >> $GITHUB_STEP_SUMMARY
           fi
