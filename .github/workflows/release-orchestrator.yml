@@ -69,7 +69,6 @@ jobs:
       body:           ${{ steps.mod.outputs.body }}
       mod_name:       ${{ steps.vars.outputs.mod_name }}
       changelog_name: ${{ steps.vars.outputs.changelog_name }}
-      md5:            ${{ steps.md5.outputs.md5 }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -127,6 +126,8 @@ jobs:
           tag_name:   ${{ inputs.tag_name || github.ref_name }}
           refs_token: ${{ secrets.RELEASE_NOTES_TOKEN }}
 
+      # Keep this the LAST step of the job: it only covers failures
+      # of steps that run before it.
       - name: Delete tag on failure or cancellation (re-push to retry)
         if: failure() || cancelled()
         shell: bash
@@ -135,15 +136,6 @@ jobs:
         run: |
           echo "::warning::Deleting tag ${{ inputs.tag_name || github.ref_name }} due to failure. Fix locally, then re-push the tag."
           gh api -X DELETE repos/${{ github.repository }}/git/refs/tags/${{ inputs.tag_name || github.ref_name }} || echo "Tag deletion failed or already removed"
-
-      - name: Compute MD5 of the archive
-        id: md5
-        if: steps.mod.outcome == 'success'
-        shell: bash
-        run: |
-          set -euo pipefail
-          archive="${{ steps.mod.outputs.archive }}"
-          echo "md5=$(md5sum "$archive" | awk '{ print $1 }')" >> "$GITHUB_OUTPUT"
 
   nexus_upload:
     needs: release
@@ -187,7 +179,9 @@ jobs:
           MOD_ID=""
           for i in {1..5}; do
             if RESPONSE="$(curl -sf -H "apikey: $API_KEY" "$API_URL")"; then
-              MOD_ID="$(echo "$RESPONSE" | jq -r '.data.game_scoped_id // empty')"
+              # /mods/{id}/changelogs takes the mod's unique `id`, not the
+              # game-scoped ID that appears in the site URL.
+              MOD_ID="$(echo "$RESPONSE" | jq -r '.data.id // empty')"
               [[ -n "$MOD_ID" ]] && break
             fi
             (( i < 5 )) && sleep $(( 2 ** i )) || true
@@ -199,7 +193,7 @@ jobs:
           fi
 
           echo "mod_id=$MOD_ID" >> "$GITHUB_OUTPUT"
-          echo "Fetched mod_id: $MOD_ID"
+          echo "Fetched mod_id: $MOD_ID (game-scoped ID from URL: $GAME_SCOPED_ID)"
 
       - name: Upload mod to NexusMods
         id: nexus_upload
