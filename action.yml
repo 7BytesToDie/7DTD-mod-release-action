@@ -142,11 +142,22 @@ runs:
             exit 1
           fi
         else
-          mapfile -t found < <(
+          mapfile -t candidates < <(
             find . -name '*.csproj' -type f \
               -not -path '*/bin/*' -not -path '*/obj/*' \
               -not -path '*/packages/*'
           )
+          # A test project builds a test DLL, never the mod DLL, so skip any
+          # project that declares itself one. Without this, adding a test
+          # project to a single-project repo makes the auto-detect ambiguous.
+          found=()
+          for candidate in "${candidates[@]}"; do
+            if grep -Eqi '<IsTestProject>[[:space:]]*true[[:space:]]*</IsTestProject>' "$candidate"; then
+              echo "Skipping test project: $candidate"
+              continue
+            fi
+            found+=("$candidate")
+          done
           if [[ ${#found[@]} -eq 0 ]]; then
             echo "No .csproj found; skipping build steps."
             echo "path=" >> "$GITHUB_OUTPUT"
