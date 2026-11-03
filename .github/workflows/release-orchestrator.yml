@@ -30,7 +30,7 @@ permissions:
 
 concurrency:
   group: release-${{ inputs.tag_name || github.ref_name }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   detect:
@@ -195,6 +195,31 @@ jobs:
           echo "mod_id=$MOD_ID" >> "$GITHUB_OUTPUT"
           echo "Fetched mod_id: $MOD_ID (game-scoped ID from URL: $GAME_SCOPED_ID)"
 
+      - name: Determine game version and mod kind
+        id: gameversion
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_NOTES_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          GAME_VERSION="$(gh release view --repo 7BytesToDie/7DTD-refs \
+                            --json tagName -q .tagName)"
+          if [[ -z "$GAME_VERSION" || "$GAME_VERSION" == "null" ]]; then
+            echo "::error::Could not determine the latest game version from 7BytesToDie/7DTD-refs."
+            exit 1
+          fi
+
+          if unzip -Z1 "${{ steps.zip.outputs.zip }}" | grep -qiE '\.dll$'; then
+            PREFIX="Compiled against game version"
+          else
+            PREFIX="Target game version"
+          fi
+
+          echo "game_version=$GAME_VERSION" >> "$GITHUB_OUTPUT"
+          echo "prefix=$PREFIX"             >> "$GITHUB_OUTPUT"
+          echo "$PREFIX: $GAME_VERSION"
+
       - name: Upload mod to NexusMods
         id: nexus_upload
         uses: Nexus-Mods/upload-action@v1.0.0-beta.10
@@ -203,13 +228,13 @@ jobs:
           file_id: ${{ secrets.NEXUSMODS_FILE_GROUP_ID }}
           filename: ${{ steps.zip.outputs.zip }}
           display_name: ${{ needs.release.outputs.mod_name }}-${{ needs.release.outputs.version }}
-          description: "[url=https://raw.githubusercontent.com/7BytesToDie/mods/main/${{ needs.release.outputs.changelog_name }}/changelog.md]Full changelog[/url]"
+          description: "${{ steps.gameversion.outputs.prefix }}: ${{ steps.gameversion.outputs.game_version }} [url=https://raw.githubusercontent.com/7BytesToDie/mods/main/${{ needs.release.outputs.changelog_name }}/changelog.md]changelog[/url]"
           version: ${{ needs.release.outputs.version }}
           changelog: ${{ needs.release.outputs.body }}
           mod_id: ${{ steps.nexus_id.outputs.mod_id }}
           primary_mod_manager_download: true
           allow_mod_manager_download: true
-          archive_existing_version: true
+          archive_existing_version: false
           update_mod_version: true
 
   changelog:
