@@ -1,0 +1,158 @@
+name: Build mod DLLs
+description: Build a mod .csproj against the 7DTD reference assemblies and stage every DLL the mod ships.
+
+inputs:
+  csproj:
+    required: true
+    description: Repository-relative path of the .csproj to build.
+
+  dest_dir:
+    required: true
+    description: Folder the built DLLs are copied into.
+
+  refs_repo:
+    required: false
+    default: 7BytesToDie/7dtd-refs
+
+  refs_token:
+    required: true
+    description: |
+      Token with read access to the refs repo's release assets.
+      Must be a fine-grained PAT or classic PAT scoped to that repo.
+
+  run_tests:
+    required: false
+    default: 'true'
+    description: Run every test project (IsTestProject=true) before the build. 'false' skips them.
+
+outputs:
+  dlls:
+    description: Newline-separated file names of the staged DLLs.
+    value: ${{ steps.stage.outputs.dlls }}
+  main_dll:
+    description: File name of the DLL the .csproj itself produces.
+    value: ${{ steps.stage.outputs.main_dll }}
+  refs_tag:
+    description: Tag of the refs release the build compiled against.
+    value: ${{ steps.refs.outputs.tag }}
+
+runs:
+  using: composite
+
+  steps:
+    - name: Setup .NET
+      uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6
+      with:
+        # Reads the SDK version from the mod repo's global.json, and fails
+        # if the file is missing: a build requires knowing which SDK it uses.
+        global-json-file: ./global.json
+
+    - name: Download 7DTD reference assemblies
+      id: refs
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.refs_token }}
+        REFS_REPO: ${{ inputs.refs_repo }}
+      run: |
+        set -euo pipefail
+        # Resolve "latest" once, so the assemblies compiled against and the
+        # game version reported downstream come from the same release.
+        tag="$(gh release view --repo "$REFS_REPO" --json tagName -q .tagName)"
+        if [[ -z "$tag" ]]; then
+          echo "::error::Could not resolve the latest release of $REFS_REPO."
+          exit 1
+        fi
+        mkdir -p "$RUNNER_TEMP/refs"
+        gh release download "$tag" \
+          --repo "$REFS_REPO" \
+          --dir "$RUNNER_TEMP/refs" \
+          --pattern '*.dll' \
+          --clobber
+        count=$(ls -1 "$RUNNER_TEMP/refs"/*.dll | wc -l)
+        echo "Downloaded $count reference assemblies from $REFS_REPO $tag."
+        echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+    - name: Run tests
+      if: inputs.run_tests == 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        mapfile -t tests < <(
+          find . -name '*.csproj' -type f \
+            -not -path '*/bin/*' -not -path '*/obj/*' \
+            -not -path '*/packages/*' \
+            -exec grep -Eqi '<IsTestProject>[[:space:]]*true[[:space:]]*</IsTestProject>' {} \; \
+            -print
+        )
+        if [[ ${#tests[@]} -eq 0 ]]; then
+          echo "No test project found; skipping tests."
+          exit 0
+        fi
+        for project in "${tests[@]}"; do
+          dotnet test "$project" -c Release --nologo -p:SevenDTDRefs="$RUNNER_TEMP/refs"
+        done
+
+    - name: Build mod
+      shell: bash
+      env:
+        CSPROJ: ${{ inputs.csproj }}
+      run: |
+        set -euo pipefail
+        dotnet build "$CSPROJ" -c Release --nologo -p:SevenDTDRefs="$RUNNER_TEMP/refs"
+
+    - name: Stage DLLs
+      id: stage
+      shell: bash
+      env:
+        CSPROJ: ${{ inputs.csproj }}
+        DEST_DIR: ${{ inputs.dest_dir }}
+      run: |
+        set -euo pipefail
+        # Evaluation only, no second build: MSBuild reports where the DLL
+        # went, so the TFM folder is never guessed.
+        TARGET_PATH="$(dotnet msbuild "$CSPROJ" -nologo \
+          -getProperty:TargetPath \
+          -p:Configuration=Release \
+          -p:SevenDTDRefs="$RUNNER_TEMP/refs")"
+        export TARGET_PATH
+        python3 - <<'PY'
+        import hashlib
+        import os
+        import shutil
+        import sys
+        from pathlib import Path
+
+        target = Path(os.environ["TARGET_PATH"].strip())
+        if not target.is_file():
+            print(f"::error::Build produced no {target.name} at {target}.")
+            sys.exit(1)
+
+        dest = Path(os.environ["DEST_DIR"])
+        dest.mkdir(parents=True, exist_ok=True)
+
+        # The output folder holds the project's DLL plus every DLL it
+        # depends on that is copied locally, such as ProjectReference
+        # outputs. A game assembly lands there only if a project forgets
+        # Private=false, and the mod must never ship one.
+        game = {p.name.lower() for p in Path(os.environ["RUNNER_TEMP"], "refs").glob("*.dll")}
+        rows = []
+        for src in sorted(target.parent.glob("*.dll")):
+            if src.name.lower() in game:
+                print(f"::warning::Not staging {src.name}: it is a game assembly from the refs release.")
+                continue
+            shutil.copy2(src, dest / src.name)
+            digest = hashlib.sha256(src.read_bytes()).hexdigest()
+            rows.append((src.name, digest))
+            print(f"Staged {src.name} -> {(dest / src.name).as_posix()}  SHA256 {digest}")
+
+        with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8", newline="\n") as out:
+            out.write(f"main_dll={target.name}\n")
+            out.write("dlls<<STAGED_DLLS_EOF\n")
+            out.writelines(f"{name}\n" for name, _ in rows)
+            out.write("STAGED_DLLS_EOF\n")
+
+        with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8", newline="\n") as summary:
+            summary.write("### Staged DLLs\n\n| DLL | SHA256 |\n| --- | --- |\n")
+            summary.writelines(f"| `{name}` | `{digest}` |\n" for name, digest in rows)
+            summary.write("\n")
+        PY

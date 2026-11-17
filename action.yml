@@ -19,8 +19,8 @@ inputs:
     required: false
     description: |
       Path to the .csproj to build, relative to the repository root.
-      Leave empty to auto-detect a single .csproj outside bin/ and obj/.
-      If none is found, the build steps are skipped (XML-only mods).
+      Leave empty to auto-detect (see locate/action.yml). If no .csproj
+      is found, the build steps are skipped (XML-only mods).
 
   refs_repo:
     required: false
@@ -39,49 +39,37 @@ outputs:
     value: ${{ steps.metadata.outputs.archive }}
   body:
     value: ${{ steps.metadata.outputs.body }}
+  display_name:
+    description: DisplayName from ModInfo.xml, or mod_name when it has none.
+    value: ${{ steps.metadata.outputs.display_name }}
+  website:
+    description: Website from ModInfo.xml, or empty.
+    value: ${{ steps.metadata.outputs.website }}
+  dlls:
+    description: Newline-separated file names of the DLLs built into the archive; empty for XML-only mods.
+    value: ${{ steps.build.outputs.dlls }}
+  refs_tag:
+    description: Tag of the refs release the DLLs were compiled against; empty for XML-only mods.
+    value: ${{ steps.build.outputs.refs_tag }}
 
 runs:
   using: composite
 
   steps:
-    - name: Install XML and archive tools (Linux)
-      if: runner.os == 'Linux'
-      shell: bash
-      run: |
-        set -euo pipefail
-        # No-op when the orchestrator has already cached libxml2-utils;
-        # keeps the action usable standalone.
-        command -v xmllint >/dev/null || {
-          sudo apt-get update
-          sudo apt-get install -y libxml2-utils
-        }
-
-    - name: Cache Chocolatey packages
-      if: runner.os == 'Windows'
-      uses: actions/cache@v6
-      with:
-        path: ${{ github.workspace }}\chocolatey_cache
-        key: ${{ runner.os }}-choco-${{ env.ImageOS }}-v1
-
-    - name: Install XML and archive tools (Windows)
-      if: runner.os == 'Windows'
-      shell: pwsh
-      run: |
-        choco config set cacheLocation --value "$Env:GITHUB_WORKSPACE\chocolatey_cache"
-        # libxml2 provides xmllint.exe; zip and unzip are not in Git Bash.
-        # Git Bash finds them via PATH after install.
-        choco install --no-progress -y zip unzip
-
     - name: Prepare metadata
       id: metadata
       shell: bash
+      env:
+        TAG: ${{ inputs.tag_name }}
+        MOD_NAME: ${{ inputs.mod_name }}
+        MOD_FOLDER: ${{ inputs.mod_folder }}
+        SOURCE_DIR: ${{ inputs.source_dir }}
       run: |
         set -euo pipefail
 
-        TAG="${{ inputs.tag_name }}"
         VERSION="${TAG#v}"
-        MODINFO="${{ inputs.source_dir }}/${{ inputs.mod_folder }}/ModInfo.xml"
-        ARCHIVE="${{ inputs.mod_name }}-${TAG}.zip"
+        MODINFO="$SOURCE_DIR/$MOD_FOLDER/ModInfo.xml"
+        ARCHIVE="${MOD_NAME}-${TAG}.zip"
 
         git tag --list "$TAG" --format='%(contents)' | awk '
           BEGIN { skip=0 }
@@ -95,15 +83,23 @@ runs:
         }
 
         test -f "$MODINFO" || {
-          echo "::error::Missing ModInfo.xml in primary folder '${{ inputs.mod_folder }}'."
+          echo "::error::Missing ModInfo.xml in primary folder '$MOD_FOLDER'."
           exit 1
         }
 
-        # Python instead of xmllint: the libxml2 Chocolatey package no
-        # longer resolves, and Python ships on every GitHub runner.
-        XML_VERSION="$(
-          python3 -c 'import sys, xml.etree.ElementTree as ET; v = ET.parse(sys.argv[1]).getroot().find("Version"); print(v.attrib.get("value", "") if v is not None else "")' "$MODINFO"
-        )"
+        # Python instead of xmllint: Python ships on every GitHub runner.
+        modinfo_value() {
+          python3 - "$MODINFO" "$1" <<'PY'
+        import sys
+        import xml.etree.ElementTree as ET
+        element = ET.parse(sys.argv[1]).getroot().find(sys.argv[2])
+        sys.stdout.write(element.attrib.get("value", "") if element is not None else "")
+        PY
+        }
+
+        XML_VERSION="$(modinfo_value Version)"
+        DISPLAY_NAME="$(modinfo_value DisplayName)"
+        WEBSITE="$(modinfo_value Website)"
 
         test -n "$XML_VERSION" || {
           echo "::error::Unable to read Version/@value from ModInfo.xml."
@@ -124,136 +120,102 @@ runs:
           echo "tag=$TAG"
           echo "version=$VERSION"
           echo "archive=$ARCHIVE"
+          echo "display_name=${DISPLAY_NAME:-$MOD_NAME}"
+          echo "website=$WEBSITE"
           echo "body<<$DELIM"
           cat release-body.md
           echo "$DELIM"
         } >> "$GITHUB_OUTPUT"
 
+    # Nested actions cannot be referenced relative to this action, so
+    # they name the repo explicitly. Keep their ref in step with the ref
+    # callers use for this action.
     - name: Locate .csproj
       id: csproj
-      shell: bash
-      run: |
-        set -euo pipefail
-
-        if [[ -n "${{ inputs.csproj }}" ]]; then
-          path="${{ inputs.csproj }}"
-          if [[ ! -f "$path" ]]; then
-            echo "::error::csproj not found: $path"
-            exit 1
-          fi
-        else
-          mapfile -t candidates < <(
-            find . -name '*.csproj' -type f \
-              -not -path '*/bin/*' -not -path '*/obj/*' \
-              -not -path '*/packages/*'
-          )
-          # A test project builds a test DLL, never the mod DLL, so skip any
-          # project that declares itself one. Without this, adding a test
-          # project to a single-project repo makes the auto-detect ambiguous.
-          found=()
-          for candidate in "${candidates[@]}"; do
-            if grep -Eqi '<IsTestProject>[[:space:]]*true[[:space:]]*</IsTestProject>' "$candidate"; then
-              echo "Skipping test project: $candidate"
-              continue
-            fi
-            found+=("$candidate")
-          done
-          if [[ ${#found[@]} -eq 0 ]]; then
-            echo "No .csproj found; skipping build steps."
-            echo "path=" >> "$GITHUB_OUTPUT"
-            exit 0
-          elif [[ ${#found[@]} -gt 1 ]]; then
-            echo "::error::Multiple .csproj found; set the 'csproj' input explicitly:"
-            printf '  %s\n' "${found[@]}"
-            exit 1
-          fi
-          path="${found[0]}"
-        fi
-
-        echo "path=$path" >> "$GITHUB_OUTPUT"
-        echo "Using csproj: $path"
-
-    - name: Setup .NET
-      if: steps.csproj.outputs.path != ''
-      uses: actions/setup-dotnet@v6
+      uses: 7BytesToDie/7DTD-mod-release-action/locate@main
       with:
-        # Runs only when a .csproj was found; XML-only mods skip this
-        # step entirely. Reads the SDK version from the mod repo's
-        # global.json, and fails if the file is missing when a .csproj
-        # *is* present: a build requires knowing which SDK it uses.
-        global-json-file: ./global.json
-
-    - name: Download 7DTD reference assemblies
-      if: steps.csproj.outputs.path != ''
-      shell: bash
-      env:
-        GH_TOKEN: ${{ inputs.refs_token }}
-      run: |
-        set -euo pipefail
-        mkdir -p "$RUNNER_TEMP/refs"
-        gh release download \
-          --repo "${{ inputs.refs_repo }}" \
-          --dir "$RUNNER_TEMP/refs" \
-          --pattern '*.dll'
-        count=$(ls -1 "$RUNNER_TEMP/refs"/*.dll | wc -l)
-        echo "Downloaded $count reference assemblies."
+        csproj: ${{ inputs.csproj }}
 
     - name: Build mod
+      id: build
       if: steps.csproj.outputs.path != ''
-      shell: bash
-      run: |
-        set -euo pipefail
-
-        CSPROJ="${{ steps.csproj.outputs.path }}"
-        DLL_NAME="$(basename "$CSPROJ" .csproj).dll"
-        DEST="${{ inputs.source_dir }}/${{ inputs.mod_folder }}/$DLL_NAME"
-
-        dotnet build "$CSPROJ" \
-          -c Release \
-          -p:SevenDTDRefs="$RUNNER_TEMP/refs"
-
-        # Find the newest matching DLL under bin/Release, regardless of TFM.
-        DLL_PATH=$(find "$(dirname "$CSPROJ")/bin/Release" \
-          -name "$DLL_NAME" -type f -printf '%T@ %p\n' \
-          | sort -rn | head -n1 | cut -d' ' -f2-)
-
-        if [[ -z "$DLL_PATH" ]]; then
-          echo "::error::Build produced no $DLL_NAME under bin/Release."
-          exit 1
-        fi
-
-        cp "$DLL_PATH" "$DEST"
-        echo "Staged $DLL_PATH -> $DEST"
-        echo "SHA256: $(sha256sum "$DEST" | cut -d' ' -f1)"
+      uses: 7BytesToDie/7DTD-mod-release-action/build@main
+      with:
+        csproj: ${{ steps.csproj.outputs.path }}
+        dest_dir: ${{ inputs.source_dir }}/${{ inputs.mod_folder }}
+        refs_repo: ${{ inputs.refs_repo }}
+        refs_token: ${{ inputs.refs_token }}
 
     - name: Build archive
       shell: bash
+      env:
+        SOURCE_DIR: ${{ inputs.source_dir }}
+        ARCHIVE: ${{ steps.metadata.outputs.archive }}
       run: |
         set -euo pipefail
+        # Entry timestamps come from the tagged commit, so rebuilding the
+        # same tag produces a byte-identical archive.
+        SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
+        export SOURCE_DATE_EPOCH
+        python3 - <<'PY'
+        import os
+        import time
+        import zipfile
+        from pathlib import Path
 
-        (
-          cd "${{ inputs.source_dir }}"
-          # Archive ALL contents (all subfolders and any files at the root)
-          zip -rq "../${{ steps.metadata.outputs.archive }}" .
-        )
+        source = Path(os.environ["SOURCE_DIR"])
+        stamp = time.gmtime(int(os.environ["SOURCE_DATE_EPOCH"]))[:6]
+        # Archive ALL contents (all subfolders and any files at the root).
+        entries = sorted(source.rglob("*"), key=lambda p: p.relative_to(source).as_posix())
+        with zipfile.ZipFile(os.environ["ARCHIVE"], "w", zipfile.ZIP_DEFLATED) as archive:
+            for path in entries:
+                name = path.relative_to(source).as_posix()
+                if path.is_dir():
+                    info = zipfile.ZipInfo(name + "/", stamp)
+                    info.external_attr = (0o40755 << 16) | 0x10
+                    data = b""
+                else:
+                    info = zipfile.ZipInfo(name, stamp)
+                    info.external_attr = 0o100644 << 16
+                    info.compress_type = zipfile.ZIP_DEFLATED
+                    data = path.read_bytes()
+                # Same attributes whichever OS builds the archive.
+                info.create_system = 3
+                archive.writestr(info, data)
+        print(f"Wrote {os.environ['ARCHIVE']} with {len(entries)} entries.")
+        PY
 
     - name: Validate archive
       shell: bash
+      env:
+        ARCHIVE: ${{ steps.metadata.outputs.archive }}
+        MOD_FOLDER: ${{ inputs.mod_folder }}
+        DLLS: ${{ steps.build.outputs.dlls }}
       run: |
         set -euo pipefail
+        python3 - <<'PY'
+        import os
+        import sys
+        import zipfile
 
-        # Ensure the primary mod folder and its ModInfo.xml are present in the archive
-        unzip -Z1 "${{ steps.metadata.outputs.archive }}" |
-          grep -Fx "${{ inputs.mod_folder }}/ModInfo.xml" >/dev/null || {
-            echo "::error::Archive does not contain '${{ inputs.mod_folder }}/ModInfo.xml'."
-            exit 1
-          }
+        folder = os.environ["MOD_FOLDER"]
+        # The primary mod folder's ModInfo.xml, and every DLL the build staged.
+        required = [f"{folder}/ModInfo.xml"] + [f"{folder}/{dll}" for dll in os.environ["DLLS"].split()]
+        with zipfile.ZipFile(os.environ["ARCHIVE"]) as archive:
+            names = set(archive.namelist())
+        missing = [entry for entry in required if entry not in names]
+        for entry in missing:
+            print(f"::error::Archive does not contain '{entry}'.")
+        if missing:
+            sys.exit(1)
+        print(f"Archive contains all {len(required)} required entries.")
+        PY
 
     - name: Publish GitHub Release
-      uses: softprops/action-gh-release@v3
+      uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3
       with:
         tag_name: ${{ steps.metadata.outputs.tag }}
-        name: "${{ inputs.mod_name }} ${{ steps.metadata.outputs.tag }}"
+        name: "${{ steps.metadata.outputs.display_name }} ${{ steps.metadata.outputs.tag }}"
         body_path: release-body.md
         files: ${{ steps.metadata.outputs.archive }}
         allow_updates: true

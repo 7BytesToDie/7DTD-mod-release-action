@@ -1,0 +1,89 @@
+name: Locate mod project
+description: Find the .csproj that builds the mod DLL, or report that the mod is XML-only.
+
+inputs:
+  csproj:
+    required: false
+    default: ''
+    description: |
+      Path to the .csproj to build, relative to the repository root.
+      Leave empty to auto-detect: test projects (IsTestProject=true) are
+      skipped, and of the rest, the one no other project references is
+      picked. An empty result means an XML-only mod.
+
+outputs:
+  path:
+    description: Repository-relative path of the .csproj, or empty for an XML-only mod.
+    value: ${{ steps.locate.outputs.path }}
+
+runs:
+  using: composite
+
+  steps:
+    - name: Locate .csproj
+      id: locate
+      shell: bash
+      env:
+        CSPROJ_INPUT: ${{ inputs.csproj }}
+      run: |
+        set -euo pipefail
+        python3 - <<'PY'
+        import os
+        import re
+        import sys
+        from pathlib import Path
+
+        def emit(path):
+            with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8", newline="\n") as out:
+                out.write(f"path={path}\n")
+            print(f"Using csproj: {path}" if path else "No .csproj found; XML-only mod.")
+
+        def fail(message, items):
+            print(f"::error::{message}")
+            for item in items:
+                print(f"  {item}")
+            sys.exit(1)
+
+        explicit = os.environ.get("CSPROJ_INPUT", "").strip()
+        if explicit:
+            if not Path(explicit).is_file():
+                fail(f"csproj not found: {explicit}", [])
+            emit(Path(explicit).as_posix())
+            sys.exit(0)
+
+        root = Path.cwd().resolve()
+        skip_dirs = {"bin", "obj", "packages", ".git"}
+        test_re = re.compile(r"<IsTestProject>\s*true\s*</IsTestProject>", re.IGNORECASE)
+        ref_re = re.compile(r'<ProjectReference\s+Include="([^"]+)"', re.IGNORECASE)
+
+        projects = {}
+        for path in sorted(root.rglob("*.csproj")):
+            if skip_dirs.intersection(path.relative_to(root).parts[:-1]):
+                continue
+            text = path.read_text(encoding="utf-8-sig")
+            # A test project builds a test DLL, never the mod DLL.
+            if test_re.search(text):
+                print(f"Skipping test project: {path.relative_to(root).as_posix()}")
+                continue
+            projects[path.resolve()] = text
+
+        if not projects:
+            emit("")
+            sys.exit(0)
+
+        # The mod project is the root of the reference graph: a library
+        # such as Singularity.Core is referenced by it, so it is not a root.
+        referenced = {
+            (path.parent / include.replace("\\", "/")).resolve()
+            for path, text in projects.items()
+            for include in ref_re.findall(text)
+        }
+        roots = [path for path in projects if path not in referenced]
+        if len(roots) != 1:
+            fail(
+                "Cannot pick the mod project: expected exactly one non-test .csproj "
+                "that no other project references. Set the 'csproj' input explicitly. Candidates:",
+                [path.relative_to(root).as_posix() for path in (roots or projects)],
+            )
+        emit(roots[0].relative_to(root).as_posix())
+        PY
