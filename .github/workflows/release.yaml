@@ -19,14 +19,23 @@ permissions:
 
 jobs:
   call-release:
+    # This file is the template mod repos copy. In the action repo itself
+    # a v* tag marks a version of the action, not a mod release.
+    if: github.repository != '7BytesToDie/7DTD-mod-release-action'
     uses: 7BytesToDie/7DTD-mod-release-action/.github/workflows/release-orchestrator.yml@main
     with:
       source_dir: mod
       # On a tag push, inputs is empty and github.ref_name is the tag.
       # On workflow_dispatch, inputs.tag_name is the operator's choice.
       tag_name: ${{ inputs.tag_name || github.ref_name }}
+      # Optional: the .csproj that builds the mod DLL. Leave it out to
+      # auto-detect; see locate/action.yml in the action repo.
+      # csproj: MyMod/MyMod.csproj
     secrets:
       RELEASE_NOTES_TOKEN: ${{ secrets.RELEASE_NOTES_TOKEN }}
+      # Optional: read-only token for the refs repo; RELEASE_NOTES_TOKEN
+      # is used when this secret is not set.
+      REFS_TOKEN: ${{ secrets.REFS_TOKEN }}
       NEXUSMODS_API_KEY: ${{ secrets.NEXUSMODS_API_KEY }}
       NEXUSMODS_FILE_GROUP_ID: ${{ secrets.NEXUSMODS_FILE_GROUP_ID }}
       NEXUSMODS_MOD_URL: ${{ secrets.NEXUSMODS_MOD_URL }}

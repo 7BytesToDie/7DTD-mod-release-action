@@ -1,0 +1,11 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    # "/" covers .github/workflows and the root action.yml; the nested
+    # actions each need their own entry.
+    directories:
+      - /
+      - /build
+      - /locate
+    schedule:
+      interval: weekly
