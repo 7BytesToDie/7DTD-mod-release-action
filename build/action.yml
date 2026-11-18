@@ -29,6 +29,9 @@ outputs:
   dlls:
     description: Newline-separated file names of the staged DLLs.
     value: ${{ steps.stage.outputs.dlls }}
+  pdbs:
+    description: Newline-separated file names of the staged PDBs.
+    value: ${{ steps.stage.outputs.pdbs }}
   main_dll:
     description: File name of the DLL the .csproj itself produces.
     value: ${{ steps.stage.outputs.main_dll }}
@@ -133,9 +136,11 @@ runs:
         # The output folder holds the project's DLL plus every DLL it
         # depends on that is copied locally, such as ProjectReference
         # outputs. A game assembly lands there only if a project forgets
-        # Private=false, and the mod must never ship one.
+        # Private=false, and the mod must never ship one. A DLL's PDB is
+        # staged with it whenever the build produced one.
         game = {p.name.lower() for p in Path(os.environ["RUNNER_TEMP"], "refs").glob("*.dll")}
         rows = []
+        pdbs = []
         for src in sorted(target.parent.glob("*.dll")):
             if src.name.lower() in game:
                 print(f"::warning::Not staging {src.name}: it is a game assembly from the refs release.")
@@ -144,12 +149,20 @@ runs:
             digest = hashlib.sha256(src.read_bytes()).hexdigest()
             rows.append((src.name, digest))
             print(f"Staged {src.name} -> {(dest / src.name).as_posix()}  SHA256 {digest}")
+            pdb = src.with_suffix(".pdb")
+            if pdb.is_file():
+                shutil.copy2(pdb, dest / pdb.name)
+                pdbs.append(pdb.name)
+                print(f"Staged {pdb.name} -> {(dest / pdb.name).as_posix()}")
 
         with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8", newline="\n") as out:
             out.write(f"main_dll={target.name}\n")
             out.write("dlls<<STAGED_DLLS_EOF\n")
             out.writelines(f"{name}\n" for name, _ in rows)
             out.write("STAGED_DLLS_EOF\n")
+            out.write("pdbs<<STAGED_PDBS_EOF\n")
+            out.writelines(f"{name}\n" for name in pdbs)
+            out.write("STAGED_PDBS_EOF\n")
 
         with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8", newline="\n") as summary:
             summary.write("### Staged DLLs\n\n| DLL | SHA256 |\n| --- | --- |\n")

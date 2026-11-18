@@ -48,6 +48,9 @@ outputs:
   dlls:
     description: Newline-separated file names of the DLLs built into the archive; empty for XML-only mods.
     value: ${{ steps.build.outputs.dlls }}
+  pdbs:
+    description: Newline-separated file names of the PDBs built into the archive; empty for XML-only mods.
+    value: ${{ steps.build.outputs.pdbs }}
   refs_tag:
     description: Tag of the refs release the DLLs were compiled against; empty for XML-only mods.
     value: ${{ steps.build.outputs.refs_tag }}
@@ -191,6 +194,7 @@ runs:
         ARCHIVE: ${{ steps.metadata.outputs.archive }}
         MOD_FOLDER: ${{ inputs.mod_folder }}
         DLLS: ${{ steps.build.outputs.dlls }}
+        PDBS: ${{ steps.build.outputs.pdbs }}
       run: |
         set -euo pipefail
         python3 - <<'PY'
@@ -199,8 +203,9 @@ runs:
         import zipfile
 
         folder = os.environ["MOD_FOLDER"]
-        # The primary mod folder's ModInfo.xml, and every DLL the build staged.
-        required = [f"{folder}/ModInfo.xml"] + [f"{folder}/{dll}" for dll in os.environ["DLLS"].split()]
+        # The primary mod folder's ModInfo.xml, and every DLL and PDB the build staged.
+        staged = os.environ["DLLS"].split() + os.environ["PDBS"].split()
+        required = [f"{folder}/ModInfo.xml"] + [f"{folder}/{name}" for name in staged]
         with zipfile.ZipFile(os.environ["ARCHIVE"]) as archive:
             names = set(archive.namelist())
         missing = [entry for entry in required if entry not in names]
