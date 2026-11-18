@@ -33,9 +33,6 @@ jobs:
       # csproj: MyMod/MyMod.csproj
     secrets:
       RELEASE_NOTES_TOKEN: ${{ secrets.RELEASE_NOTES_TOKEN }}
-      # Optional: read-only token for the refs repo; RELEASE_NOTES_TOKEN
-      # is used when this secret is not set.
-      REFS_TOKEN: ${{ secrets.REFS_TOKEN }}
       NEXUSMODS_API_KEY: ${{ secrets.NEXUSMODS_API_KEY }}
       NEXUSMODS_FILE_GROUP_ID: ${{ secrets.NEXUSMODS_FILE_GROUP_ID }}
       NEXUSMODS_MOD_URL: ${{ secrets.NEXUSMODS_MOD_URL }}

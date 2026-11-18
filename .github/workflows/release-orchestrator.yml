@@ -23,10 +23,6 @@ on:
     secrets:
       RELEASE_NOTES_TOKEN:
         required: true
-      # Optional: read-only token for the refs repo. RELEASE_NOTES_TOKEN
-      # is used when the caller does not pass one.
-      REFS_TOKEN:
-        required: false
       NEXUSMODS_API_KEY:
         required: true
       NEXUSMODS_FILE_GROUP_ID:
@@ -162,7 +158,7 @@ jobs:
           source_dir: ${{ inputs.source_dir }}
           tag_name:   ${{ env.TAG }}
           csproj:     ${{ needs.detect.outputs.csproj }}
-          refs_token: ${{ secrets.REFS_TOKEN || secrets.RELEASE_NOTES_TOKEN }}
+          refs_token: ${{ secrets.RELEASE_NOTES_TOKEN }}
 
       # Keep this the LAST step of the job: it only covers failures
       # of steps that run before it. Only a pushed tag that has never been
@@ -242,7 +238,7 @@ jobs:
         id: gameversion
         shell: bash
         env:
-          GH_TOKEN: ${{ secrets.REFS_TOKEN || secrets.RELEASE_NOTES_TOKEN }}
+          GH_TOKEN: ${{ secrets.RELEASE_NOTES_TOKEN }}
           REFS_TAG: ${{ needs.release.outputs.refs_tag }}
         run: |
           set -euo pipefail
